@@ -14,6 +14,10 @@ export async function POST(req: Request) {
     if (eventType !== 'ACTOR.RUN.SUCCEEDED') {
       return NextResponse.json({ success: true, message: 'Ignored non-success event' });
     }
+
+    if (!token) {
+      throw new Error('APIFY_API_TOKEN is missing');
+    }
     
     const runId = eventData.actorRunId;
     
@@ -43,14 +47,14 @@ export async function POST(req: Request) {
     // Process and insert leads (Anti-Duplicate logic via ON CONFLICT DO NOTHING)
     for (const item of items) {
       // Extract emails using a simple regex from snippet or description
-      const textToSearch = JSON.stringify(item);
+      const textToSearch = JSON.stringify(item) || "";
       const emails = textToSearch.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
-      const email = emails.length > 0 ? emails[0].toLowerCase() : null;
+      const email = emails[0] ? emails[0].toLowerCase() : null;
       
       // Extract IG handle from URL if platform is instagram
       let igHandle = null;
-      if (platform === 'instagram' && item.url) {
-        const match = item.url.match(/instagram\.com\/([^/?]+)/);
+      if (platform === 'instagram' && item && typeof (item as any).url === 'string') {
+        const match = (item as any).url.match(/instagram\.com\/([^/?]+)/);
         if (match) igHandle = match[1];
       }
 
@@ -69,7 +73,7 @@ export async function POST(req: Request) {
           ON CONFLICT (ig_handle) DO NOTHING
           RETURNING id
         `, [
-          email || \`pending-\${igHandle}@placeholder.com\`, // Temporary email if null but we have IG
+          email || `pending-${igHandle}@placeholder.com`, // Temporary email if null but we have IG
           igHandle,
           platform,
           item.title || item.snippet,
@@ -77,7 +81,7 @@ export async function POST(req: Request) {
           taskId
         ]);
 
-        if (result.rowCount > 0) {
+        if (result.rowCount && result.rowCount > 0) {
           leadsInserted++;
         }
       } catch (insertError: any) {
