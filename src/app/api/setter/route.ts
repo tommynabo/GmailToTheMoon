@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import { classifyIntent, generateSetterReply } from '@/lib/setter/openai';
-import { createClient } from '@supabase/supabase-js';
+import { Client } from 'pg';
 
 // Esto simula la recepción de un webhook de Instantly cuando alguien responde
 export async function POST(req: Request) {
+  let dbClient;
   try {
     const body = await req.json();
     const { email, lead_id, reply_text, thread_history } = body;
@@ -18,35 +19,27 @@ export async function POST(req: Request) {
 
     // Si no está interesado, no respondemos
     if (intent === 'NOT_INTERESTED' || intent === 'OUT_OF_OFFICE') {
-      // TODO: Actualizar status en Instantly/Supabase a 'DNC' (Do Not Contact)
+      // TODO: Actualizar status en Instantly/Neon a 'DNC' (Do Not Contact)
       return NextResponse.json({ success: true, action: 'ignored', intent });
     }
 
     // 2. Generar respuesta
     const aiReply = await generateSetterReply(reply_text, thread_history || []);
     
-    // 3. Registrar interacción en Supabase (Opcional, pero recomendado)
-    if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      const supabase = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL,
-        process.env.SUPABASE_SERVICE_ROLE_KEY
-      );
+    // 3. Registrar interacción en Neon DB
+    if (process.env.DATABASE_URL) {
+      dbClient = new Client({ connectionString: process.env.DATABASE_URL });
+      await dbClient.connect();
       
       // Buscar lead
-      const { data: lead } = await supabase
-        .from('leads')
-        .select('id')
-        .eq('email', email)
-        .single();
+      const result = await dbClient.query('SELECT id FROM leads WHERE email = $1 LIMIT 1', [email]);
         
-      if (lead) {
-        await supabase.from('ai_interactions').insert({
-          lead_id: lead.id,
-          intent_type: intent,
-          user_reply: reply_text,
-          ai_response: aiReply,
-          status: 'replied'
-        });
+      if (result.rows.length > 0) {
+        const lead = result.rows[0];
+        await dbClient.query(
+          'INSERT INTO ai_interactions (lead_id, intent_type, user_reply, ai_response, status) VALUES ($1, $2, $3, $4, $5)',
+          [lead.id, intent, reply_text, aiReply, 'replied']
+        );
       }
     }
 
@@ -62,5 +55,9 @@ export async function POST(req: Request) {
   } catch (error: any) {
     console.error('[API Setter] Error:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });
+  } finally {
+    if (dbClient) {
+      await dbClient.end();
+    }
   }
 }
