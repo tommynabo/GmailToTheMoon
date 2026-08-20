@@ -1,6 +1,7 @@
 import { Search } from 'lucide-react';
 import { Client } from 'pg';
 import Sidebar from '@/components/Sidebar';
+import SearchModal from '@/components/SearchModal';
 
 // Forzar renderizado dinámico para que las métricas estén siempre actualizadas
 export const dynamic = 'force-dynamic';
@@ -46,10 +47,7 @@ export default async function Home() {
             <h2 className="text-3xl font-bold tracking-tight mb-1">Search Autopilot</h2>
             <p className="text-gray-400">Extract high-ticket B2B founders and consultants.</p>
           </div>
-          <button className="btn-primary flex items-center gap-2">
-            <Search size={18} />
-            Start New Search
-          </button>
+          <SearchModal />
         </header>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">

@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS public.leads (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now())
 );
 
+-- INDICE ÚNICO PARA ANTIDUPLICADOS POR IG (Vital)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_ig_handle ON public.leads(ig_handle) WHERE ig_handle IS NOT NULL;
+
 -- 2. Tabla de Interacciones del AI Setter
 CREATE TABLE IF NOT EXISTS public.ai_interactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
