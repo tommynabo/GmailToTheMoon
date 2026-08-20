@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { Client } from 'pg';
 
 export async function POST(req: Request) {
   try {
@@ -20,12 +21,43 @@ export async function POST(req: Request) {
     const nameParts = fullName.split(' ');
     const firstName = body.firstName || nameParts[0] || '';
     const lastName = body.lastName || nameParts.slice(1).join(' ') || '';
+    const email = body.email.toLowerCase().trim();
+    const igHandle = body.igHandle || '';
+
+    // ── 0. Credit Optimization: Comprobar duplicados y límite diario en Neon DB ──
+    if (process.env.DATABASE_URL) {
+      const dbClient = new Client({ connectionString: process.env.DATABASE_URL });
+      try {
+        await dbClient.connect();
+        
+        // Comprobar límite diario (150 leads)
+        const limitRes = await dbClient.query("SELECT COUNT(*) FROM leads WHERE created_at >= CURRENT_DATE");
+        if (parseInt(limitRes.rows[0].count) >= 150) {
+          console.log('[CREDIT OPTIMIZATION] Daily limit of 150 leads reached. Skipping.');
+          return NextResponse.json({ success: false, reason: 'daily_limit_reached' }, { status: 429 });
+        }
+
+        // Comprobar si ya existe el lead (por email o ig_handle)
+        const dupRes = await dbClient.query(
+          "SELECT id FROM leads WHERE email = $1 OR (ig_handle = $2 AND ig_handle != '') LIMIT 1", 
+          [email, igHandle]
+        );
+        if (dupRes.rows.length > 0) {
+          console.log(`[CREDIT OPTIMIZATION] Lead already exists: ${email}. Skipping.`);
+          return NextResponse.json({ success: false, reason: 'duplicate' }, { status: 200 });
+        }
+      } catch (err) {
+        console.error('[DB] Error checking limits/duplicates:', err);
+      } finally {
+        await dbClient.end();
+      }
+    }
 
     const resolvedCampaignId = body.campaignId?.trim() || campaignId;
 
     const payload: Record<string, any> = {
       campaign: resolvedCampaignId,
-      email: body.email.toLowerCase().trim(),
+      email: email,
       first_name: firstName,
       last_name: lastName,
       company_name: body.companyName || '',
@@ -87,6 +119,27 @@ export async function POST(req: Request) {
         status: response.status,
         details: responseData,
       }, { status: response.status });
+    }
+
+    // ── 3. Guardar en Neon DB ──
+    if (process.env.DATABASE_URL) {
+      const dbClient = new Client({ connectionString: process.env.DATABASE_URL });
+      try {
+        await dbClient.connect();
+        await dbClient.query(
+          `INSERT INTO leads (email, first_name, last_name, company_name, ig_handle, follower_count, niche, instantly_status, campaign_id, ai_summary)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (email) DO NOTHING`,
+          [
+            email, firstName, lastName, body.companyName || '', igHandle, 
+            body.followerCount || 0, body.niche || '', 'pushed', resolvedCampaignId, body.aiSummary || ''
+          ]
+        );
+      } catch (err) {
+        console.error('[DB] Error saving lead:', err);
+      } finally {
+        await dbClient.end();
+      }
     }
 
     console.log('[INSTANTLY] Lead added:', payload.email, '| campaign:', resolvedCampaignId);
