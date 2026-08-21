@@ -123,13 +123,12 @@ export async function GET(req: Request) {
   }
 
   // ─── LÓGICA DE RATIO 65% ESPAÑA / 35% INTERNACIONAL ─────────────────────
-  // Usamos el intervalo de 30 mins para crear un ratio determinista.
-  // De cada 100 intervalos, los primeros 65 (65%) usarán configuración de España, el resto (35%) Internacional.
-  const interval30 = Math.floor(Date.now() / (30 * 60 * 1000));
-  const isSpain = (interval30 % 100) < 65;
+  // Usamos el intervalo de 15 mins para rotar la keyword si el cron se lanza con más frecuencia.
+  const interval15 = Math.floor(Date.now() / (15 * 60 * 1000));
+  const isSpain = (interval15 % 100) < 65;
   
   const keywordsList = isSpain ? KEYWORDS_ES : KEYWORDS_EN;
-  const keyword = keywordsList[interval30 % keywordsList.length];
+  const keyword = keywordsList[interval15 % keywordsList.length];
   const platform = 'instagram';
   const searchQuery = `site:instagram.com "${keyword}" ("@gmail.com" OR "@yahoo.com" OR "@hotmail.com" OR "@outlook.com")`;
 
