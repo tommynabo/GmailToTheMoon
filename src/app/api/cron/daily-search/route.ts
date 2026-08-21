@@ -1,81 +1,246 @@
 import { NextResponse } from 'next/server';
-import { ApifyClient } from 'apify-client';
 import { Client } from 'pg';
 
-// Lista rotativa de nichos/keywords
+// ─── KEYWORDS rotativas ────────────────────────────────────────────────────────
+// Cada día usa una keyword diferente para diversificar la búsqueda.
 const KEYWORDS = [
-  "B2B Consultant",
-  "Agency Founder",
-  "Growth Partner",
-  "B2B Coach",
-  "SaaS Founder",
-  "Marketing Consultant"
+  'B2B Consultant',
+  'Agency Founder',
+  'Growth Partner',
+  'B2B Coach',
+  'SaaS Founder',
+  'Marketing Consultant',
+  'Business Coach',
+  'Lead Generation Expert',
+  'Revenue Consultant',
+  'Sales Coach',
 ];
 
+// ─── CONSTANTES ────────────────────────────────────────────────────────────────
+const ACTOR_ID  = 'scraperlink~google-search-results-serp-scraper';
+const APIFY_BASE = 'https://api.apify.com/v2';
+const POLL_INTERVAL_MS = 4_000;
+const MAX_WAIT_MS = 3 * 60 * 1000; // 3 minutos máximo de espera
+const RESULTS_LIMIT = 50;
+
+// Regex de email estándar
+const EMAIL_REGEX = /[a-zA-Z0-9._%+\-]+@(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,10}/g;
+
+// ─── HELPERS ───────────────────────────────────────────────────────────────────
+
+function extractEmails(text: string): string[] {
+  const matches = text.match(EMAIL_REGEX) ?? [];
+  return [...new Set(
+    matches
+      .map(e => e.toLowerCase())
+      .filter(e => !e.includes('example.com') && !e.includes('sentry.io') && e.includes('@'))
+  )];
+}
+
+function extractIgHandle(url: string): string | null {
+  try {
+    if (!url.includes('instagram.com')) return null;
+    const parsed = new URL(url.startsWith('http') ? url : 'https://' + url);
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    if (parts.length === 0) return null;
+    const handle = parts[0].replace(/^@/, '').toLowerCase();
+    const SKIP = new Set(['p', 'reel', 'explore', 'accounts', 'tv', 'stories', 'tags', 'about']);
+    if (SKIP.has(handle) || handle.length < 2 || handle.length > 30) return null;
+    return handle;
+  } catch {
+    return null;
+  }
+}
+
+async function apifyStart(token: string, input: unknown): Promise<{ runId: string; datasetId: string }> {
+  const url = `${APIFY_BASE}/acts/${ACTOR_ID}/runs?timeout=120&memory=512`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+  const data = await res.json() as any;
+  if (!data?.data?.id || !data?.data?.defaultDatasetId) {
+    throw new Error(`Apify start failed: ${JSON.stringify(data).slice(0, 300)}`);
+  }
+  return { runId: data.data.id, datasetId: data.data.defaultDatasetId };
+}
+
+async function apifyPoll(token: string, runId: string): Promise<string> {
+  const url = `${APIFY_BASE}/acts/${ACTOR_ID}/runs/${runId}`;
+  const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+  const data = await res.json() as any;
+  return data?.data?.status ?? 'UNKNOWN';
+}
+
+async function apifyGetItems(token: string, datasetId: string): Promise<any[]> {
+  const url = `${APIFY_BASE}/datasets/${datasetId}/items?limit=${RESULTS_LIMIT}`;
+  const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+async function apifyAbort(token: string, runId: string): Promise<void> {
+  try {
+    await fetch(`${APIFY_BASE}/actor-runs/${runId}/abort`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+  } catch { /* ignore */ }
+}
+
+// ─── MAIN HANDLER ──────────────────────────────────────────────────────────────
+
 export async function GET(req: Request) {
-  // 1. Verificación de Seguridad de Vercel Cron
-  // En producción, Vercel envía el header 'x-vercel-cron'
+  // Seguridad: solo Vercel Cron o entorno dev
   const isCron = req.headers.get('x-vercel-cron') === '1';
-  
   if (!isCron && process.env.NODE_ENV === 'production') {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  let dbClient;
+  const token = process.env.APIFY_API_TOKEN;
+  if (!token) {
+    return NextResponse.json({ error: 'APIFY_API_TOKEN not configured' }, { status: 500 });
+  }
+
+  // Keyword rotativa por día del año
+  const dayOfYear = Math.floor(
+    (Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86_400_000
+  );
+  const keyword = KEYWORDS[dayOfYear % KEYWORDS.length];
+  const platform = 'instagram';
+  const searchQuery = `site:instagram.com "${keyword}" ("@gmail.com" OR "@yahoo.com" OR "@hotmail.com" OR "@outlook.com")`;
+
+  let dbClient: Client | undefined;
+  let taskId: string | undefined;
+  let runId: string | undefined;
+
   try {
-    const token = process.env.APIFY_API_TOKEN;
-    if (!token) {
-      return NextResponse.json({ error: 'Apify token not configured' }, { status: 500 });
-    }
-
-    // 2. Elegir una keyword basada en el día actual (rotativa)
-    const dayOfYear = Math.floor(
-      (Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 1000 / 60 / 60 / 24
-    );
-    const query = KEYWORDS[dayOfYear % KEYWORDS.length];
-    const platform = 'instagram';
-
-    // 3. Crear la tarea en la BD
+    // ─ 1. Crear task en DB ──────────────────────────────────────────────────
     dbClient = new Client({ connectionString: process.env.DATABASE_URL });
     await dbClient.connect();
 
     const taskResult = await dbClient.query(
       `INSERT INTO search_tasks (query, platform, status) VALUES ($1, $2, 'running') RETURNING id`,
-      [query, platform]
+      [keyword, platform]
     );
-    const taskId = taskResult.rows[0].id;
+    taskId = taskResult.rows[0].id as string;
+    console.log(`[Autopilot] Task created: ${taskId} | keyword: "${keyword}"`);
 
-    // 4. Iniciar búsqueda en Apify
-    const client = new ApifyClient({ token });
-    const actorId = 'apify/google-search-scraper';
-    const searchDork = `site:instagram.com "${query}" ("@gmail.com" OR "@yahoo.com" OR "@hotmail.com")`;
-
-    const runInfo = await client.actor(actorId).start({
-      queries: searchDork,
-      resultsPerPage: 200,
-      maxPagesPerQuery: 2, 
-      customData: { taskId }
+    // ─ 2. Lanzar actor ─────────────────────────────────────────────────────
+    const { runId: apifyRunId, datasetId } = await apifyStart(token, {
+      keyword: searchQuery,
+      limit: String(RESULTS_LIMIT),
     });
+    runId = apifyRunId;
 
-    // 5. Actualizar la tarea con el run_id
     await dbClient.query(
       `UPDATE search_tasks SET apify_run_id = $1 WHERE id = $2`,
-      [runInfo.id, taskId]
+      [runId, taskId]
+    );
+    console.log(`[Autopilot] Actor started: runId=${runId}`);
+
+    // ─ 3. Polling hasta completar ───────────────────────────────────────────
+    const deadline = Date.now() + MAX_WAIT_MS;
+    let finalStatus = '';
+
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+      finalStatus = await apifyPoll(token, runId);
+      console.log(`[Autopilot] Poll: ${finalStatus}`);
+      if (['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(finalStatus)) break;
+    }
+
+    if (!['SUCCEEDED', 'TIMED-OUT'].includes(finalStatus)) {
+      // Abortar actor huérfano
+      await apifyAbort(token, runId);
+      throw new Error(`Actor did not succeed. Final status: ${finalStatus}`);
+    }
+
+    // ─ 4. Obtener resultados ────────────────────────────────────────────────
+    const items = await apifyGetItems(token, datasetId);
+    console.log(`[Autopilot] Items received: ${items.length}`);
+
+    // ─ 5. Procesar y guardar leads ──────────────────────────────────────────
+    let leadsInserted = 0;
+
+    for (const item of items) {
+      const textToSearch = [
+        item.title ?? '',
+        item.description ?? '',
+        item.snippet ?? '',
+        item.url ?? '',
+        item.link ?? '',
+      ].join(' ');
+
+      const emails = extractEmails(textToSearch);
+      const igHandle = extractIgHandle(item.url ?? item.link ?? '');
+
+      if (emails.length === 0 && !igHandle) continue;
+
+      const email = emails[0] ?? null;
+
+      try {
+        const result = await dbClient.query(`
+          INSERT INTO leads (email, ig_handle, source, ai_summary, status)
+          VALUES ($1, $2, $3, $4, 'new')
+          ON CONFLICT (email) DO NOTHING
+          RETURNING id
+        `, [
+          email ?? `noemail-${igHandle ?? Date.now()}@placeholder.internal`,
+          igHandle ?? null,
+          platform,
+          (item.title ?? '') + ' — ' + (item.description ?? item.snippet ?? '').slice(0, 200),
+        ]);
+
+        if (result.rowCount && result.rowCount > 0) {
+          leadsInserted++;
+          console.log(`[Autopilot] Lead inserted: ${email ?? igHandle}`);
+        }
+      } catch (insertErr: any) {
+        if (insertErr.code !== '23505') {
+          console.error('[Autopilot] Insert error:', insertErr.message);
+        }
+      }
+    }
+
+    // ─ 6. Marcar task como completada ──────────────────────────────────────
+    await dbClient.query(
+      `UPDATE search_tasks SET status = 'completed', leads_found = $1, completed_at = NOW() WHERE id = $2`,
+      [leadsInserted, taskId]
     );
 
-    return NextResponse.json({ 
-      success: true, 
-      message: `Daily search launched for '${query}'`,
-      taskId, 
-      runId: runInfo.id 
+    console.log(`[Autopilot] Done. Leads inserted: ${leadsInserted}`);
+    return NextResponse.json({
+      success: true,
+      keyword,
+      itemsProcessed: items.length,
+      leadsInserted,
+      taskId,
+      runId,
     });
 
   } catch (error: any) {
-    console.error('[CRON Daily Search] Error:', error.message);
+    console.error('[Autopilot] Error:', error.message);
+
+    // Marcar task como fallida si existe
+    if (dbClient && taskId) {
+      try {
+        await dbClient.query(
+          `UPDATE search_tasks SET status = 'failed', completed_at = NOW() WHERE id = $1`,
+          [taskId]
+        );
+      } catch { /* ignore */ }
+    }
+
     return NextResponse.json({ error: error.message }, { status: 500 });
+
   } finally {
     if (dbClient) {
-      await dbClient.end();
+      try { await dbClient.end(); } catch { /* ignore */ }
     }
   }
 }

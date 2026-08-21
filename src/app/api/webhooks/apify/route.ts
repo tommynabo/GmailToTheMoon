@@ -1,121 +1,135 @@
 import { NextResponse } from 'next/server';
-import { ApifyClient } from 'apify-client';
 import { Client } from 'pg';
 
+/**
+ * Apify Webhook — ACTOR.RUN.SUCCEEDED
+ *
+ * Este endpoint es un fallback. El cron principal (`/api/cron/daily-search`)
+ * ya procesa los resultados de forma self-contained mediante polling.
+ *
+ * Si quieres usarlo directamente desde Apify, configura el webhook en:
+ * https://console.apify.com → Settings → Webhooks → Add Webhook
+ *   - Event: ACTOR.RUN.SUCCEEDED
+ *   - URL: https://TU_DOMINIO.vercel.app/api/webhooks/apify
+ */
+
+const EMAIL_REGEX = /[a-zA-Z0-9._%+\-]+@(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,10}/g;
+
+function extractEmails(text: string): string[] {
+  const matches = text.match(EMAIL_REGEX) ?? [];
+  return [...new Set(
+    matches.map(e => e.toLowerCase()).filter(e => !e.includes('example.com') && e.includes('@'))
+  )];
+}
+
+function extractIgHandle(url: string): string | null {
+  try {
+    if (!url.includes('instagram.com')) return null;
+    const parsed = new URL(url.startsWith('http') ? url : 'https://' + url);
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    if (parts.length === 0) return null;
+    const handle = parts[0].replace(/^@/, '').toLowerCase();
+    const SKIP = new Set(['p', 'reel', 'explore', 'accounts', 'tv', 'stories', 'tags', 'about']);
+    if (SKIP.has(handle) || handle.length < 2 || handle.length > 30) return null;
+    return handle;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: Request) {
-  let dbClient;
+  let dbClient: Client | undefined;
   try {
     const token = process.env.APIFY_API_TOKEN;
     const body = await req.json();
-    
-    // Apify sends information about the run in the webhook payload
+
     const { eventType, eventData } = body;
-    
+
     if (eventType !== 'ACTOR.RUN.SUCCEEDED') {
-      return NextResponse.json({ success: true, message: 'Ignored non-success event' });
+      return NextResponse.json({ success: true, message: `Ignored: ${eventType}` });
     }
 
-    if (!token) {
-      throw new Error('APIFY_API_TOKEN is missing');
+    if (!token) throw new Error('APIFY_API_TOKEN is missing');
+
+    const runId: string = eventData?.actorRunId;
+    const datasetId: string = eventData?.defaultDatasetId;
+    if (!runId || !datasetId) {
+      return NextResponse.json({ error: 'Missing actorRunId or defaultDatasetId' }, { status: 400 });
     }
-    
-    const runId = eventData.actorRunId;
-    
-    // Connect to DB
+
+    // ─ Find associated task ────────────────────────────────────────────────
     dbClient = new Client({ connectionString: process.env.DATABASE_URL });
     await dbClient.connect();
 
-    // Find the associated search task
     const taskResult = await dbClient.query(
       `SELECT id, platform FROM search_tasks WHERE apify_run_id = $1 LIMIT 1`,
       [runId]
     );
-    
-    if (taskResult.rows.length === 0) {
-      return NextResponse.json({ error: 'Search task not found for runId: ' + runId }, { status: 404 });
-    }
-    
-    const taskId = taskResult.rows[0].id;
-    const platform = taskResult.rows[0].platform;
 
-    // Fetch results from Apify
-    const client = new ApifyClient({ token });
-    const { items } = await client.dataset(eventData.defaultDatasetId).listItems();
-    
+    if (taskResult.rows.length === 0) {
+      // No matching task — could be a manual run or an orphan. Just acknowledge.
+      console.warn('[Webhook] No task found for runId:', runId);
+      return NextResponse.json({ success: true, message: 'No matching task' });
+    }
+
+    const taskId: string = taskResult.rows[0].id;
+    const platform: string = taskResult.rows[0].platform ?? 'instagram';
+
+    // ─ Fetch results from Apify ────────────────────────────────────────────
+    const itemsRes = await fetch(
+      `https://api.apify.com/v2/datasets/${datasetId}/items?limit=100`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const items: any[] = await itemsRes.json().then(d => Array.isArray(d) ? d : []).catch(() => []);
+    console.log(`[Webhook] Items received: ${items.length} for task ${taskId}`);
+
+    // ─ Process & insert leads ─────────────────────────────────────────────
     let leadsInserted = 0;
 
-    // Process and insert leads (Anti-Duplicate logic via ON CONFLICT DO NOTHING)
     for (const item of items) {
-      // Extract emails using a simple regex from snippet or description
-      const textToSearch = JSON.stringify(item) || "";
-      const emails = textToSearch.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
-      const email = emails[0] ? emails[0].toLowerCase() : null;
-      
-      // Extract IG handle from URL if platform is instagram
-      let igHandle = null;
-      if (platform === 'instagram' && item && typeof (item as any).url === 'string') {
-        const match = (item as any).url.match(/instagram\.com\/([^/?]+)/);
-        if (match) igHandle = match[1];
-      }
+      const textToSearch = [
+        item.title ?? '', item.description ?? '', item.snippet ?? '',
+        item.url ?? '', item.link ?? '',
+      ].join(' ');
 
-      if (!email && !igHandle) continue; // Skip if we have neither email nor handle
+      const emails = extractEmails(textToSearch);
+      const igHandle = extractIgHandle(item.url ?? item.link ?? '');
+      if (emails.length === 0 && !igHandle) continue;
 
+      const email = emails[0] ?? null;
       try {
         const result = await dbClient.query(`
-          INSERT INTO leads (
-            email, 
-            ig_handle,
-            source,
-            ai_summary,
-            status,
-            campaign_id
-          ) VALUES ($1, $2, $3, $4, $5, $6)
-          ON CONFLICT (ig_handle) DO NOTHING
+          INSERT INTO leads (email, ig_handle, source, ai_summary, status)
+          VALUES ($1, $2, $3, $4, 'new')
+          ON CONFLICT (email) DO NOTHING
           RETURNING id
         `, [
-          email || `pending-${igHandle}@placeholder.com`, // Temporary email if null but we have IG
-          igHandle,
+          email ?? `noemail-${igHandle ?? Date.now()}@placeholder.internal`,
+          igHandle ?? null,
           platform,
-          item.title || item.snippet,
-          'new',
-          taskId
+          ((item.title ?? '') + ' — ' + (item.description ?? item.snippet ?? '')).slice(0, 255),
         ]);
-
-        if (result.rowCount && result.rowCount > 0) {
-          leadsInserted++;
-        }
-      } catch (insertError: any) {
-        // Fallback constraint violation check just in case (e.g. if email conflicts)
-        if (insertError.code !== '23505') { 
-          console.error('Error inserting lead:', insertError);
-        }
+        if (result.rowCount && result.rowCount > 0) leadsInserted++;
+      } catch (insertErr: any) {
+        if (insertErr.code !== '23505') console.error('[Webhook] Insert error:', insertErr.message);
       }
     }
 
-    // Update search task
+    // ─ Update task ────────────────────────────────────────────────────────
     await dbClient.query(
-      `UPDATE search_tasks 
-       SET status = 'completed', leads_found = $1, completed_at = NOW() 
-       WHERE id = $2`,
+      `UPDATE search_tasks SET status = 'completed', leads_found = $1, completed_at = NOW() WHERE id = $2`,
       [leadsInserted, taskId]
     );
 
+    console.log(`[Webhook] Done. Leads inserted: ${leadsInserted}`);
     return NextResponse.json({ success: true, leadsInserted });
 
   } catch (error: any) {
-    console.error('[API Apify Webhook] Error:', error.message);
-    
-    // Update task status to failed if possible
-    if (dbClient) {
-      try {
-        // Assuming we could extract runId from body to find the task, omitted for brevity in error block
-      } catch (e) {}
-    }
-    
+    console.error('[Webhook] Error:', error.message);
     return NextResponse.json({ error: error.message }, { status: 500 });
   } finally {
     if (dbClient) {
-      await dbClient.end();
+      try { await dbClient.end(); } catch { /* ignore */ }
     }
   }
 }
