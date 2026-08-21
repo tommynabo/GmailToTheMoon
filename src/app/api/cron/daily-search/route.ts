@@ -106,11 +106,9 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'APIFY_API_TOKEN not configured' }, { status: 500 });
   }
 
-  // Keyword rotativa por día del año
-  const dayOfYear = Math.floor(
-    (Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86_400_000
-  );
-  const keyword = KEYWORDS[dayOfYear % KEYWORDS.length];
+  // Keyword rotativa basada en intervalos de 30 minutos
+  const interval30 = Math.floor(Date.now() / (30 * 60 * 1000));
+  const keyword = KEYWORDS[interval30 % KEYWORDS.length];
   const platform = 'instagram';
   const searchQuery = `site:instagram.com "${keyword}" ("@gmail.com" OR "@yahoo.com" OR "@hotmail.com" OR "@outlook.com")`;
 
@@ -122,6 +120,13 @@ export async function GET(req: Request) {
     // ─ 1. Crear task en DB ──────────────────────────────────────────────────
     dbClient = new Client({ connectionString: process.env.DATABASE_URL });
     await dbClient.connect();
+
+    // Comprobar límite de 250 leads diarios
+    const limitRes = await dbClient.query("SELECT COUNT(*) FROM leads WHERE created_at >= CURRENT_DATE");
+    if (parseInt(limitRes.rows[0].count) >= 250) {
+      console.log('[Autopilot] Límite diario de 250 leads alcanzado. Saltando búsqueda.');
+      return NextResponse.json({ success: true, message: 'Daily limit of 250 leads reached' });
+    }
 
     const taskResult = await dbClient.query(
       `INSERT INTO search_tasks (query, platform, status) VALUES ($1, $2, 'running') RETURNING id`,
