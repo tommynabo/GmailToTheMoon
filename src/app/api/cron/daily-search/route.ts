@@ -3,7 +3,7 @@ import { Client } from 'pg';
 
 // ─── KEYWORDS rotativas ────────────────────────────────────────────────────────
 // Cada día usa una keyword diferente para diversificar la búsqueda.
-const KEYWORDS = [
+const KEYWORDS_EN = [
   'B2B Consultant',
   'Agency Founder',
   'Growth Partner',
@@ -14,6 +14,19 @@ const KEYWORDS = [
   'Lead Generation Expert',
   'Revenue Consultant',
   'Sales Coach',
+];
+
+const KEYWORDS_ES = [
+  'Consultor B2B',
+  'Fundador de Agencia',
+  'Growth Partner',
+  'Coach B2B',
+  'Fundador SaaS',
+  'Consultor de Marketing',
+  'Coach de Negocios',
+  'Experto en Generación de Leads',
+  'Consultor de Ventas',
+  'Coach de Ventas',
 ];
 
 // ─── CONSTANTES ────────────────────────────────────────────────────────────────
@@ -106,9 +119,14 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'APIFY_API_TOKEN not configured' }, { status: 500 });
   }
 
-  // Keyword rotativa basada en intervalos de 30 minutos
+  // ─── LÓGICA DE RATIO 65% ESPAÑA / 35% INTERNACIONAL ─────────────────────
+  // Usamos el intervalo de 30 mins para crear un ratio determinista.
+  // De cada 100 intervalos, los primeros 65 (65%) usarán configuración de España, el resto (35%) Internacional.
   const interval30 = Math.floor(Date.now() / (30 * 60 * 1000));
-  const keyword = KEYWORDS[interval30 % KEYWORDS.length];
+  const isSpain = (interval30 % 100) < 65;
+  
+  const keywordsList = isSpain ? KEYWORDS_ES : KEYWORDS_EN;
+  const keyword = keywordsList[interval30 % keywordsList.length];
   const platform = 'instagram';
   const searchQuery = `site:instagram.com "${keyword}" ("@gmail.com" OR "@yahoo.com" OR "@hotmail.com" OR "@outlook.com")`;
 
@@ -136,10 +154,20 @@ export async function GET(req: Request) {
     console.log(`[Autopilot] Task created: ${taskId} | keyword: "${keyword}"`);
 
     // ─ 2. Lanzar actor ─────────────────────────────────────────────────────
-    const { runId: apifyRunId, datasetId } = await apifyStart(token, {
+    const apifyInput: any = {
       keyword: searchQuery,
       limit: String(RESULTS_LIMIT),
-    });
+    };
+
+    if (isSpain) {
+      apifyInput.gl = 'ES'; // País: España
+      apifyInput.hl = 'es'; // Idioma: Español
+    } else {
+      apifyInput.gl = 'US'; // País: Estados Unidos (Internacional)
+      apifyInput.hl = 'en'; // Idioma: Inglés
+    }
+
+    const { runId: apifyRunId, datasetId } = await apifyStart(token, apifyInput);
     runId = apifyRunId;
 
     await dbClient.query(
