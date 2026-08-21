@@ -54,7 +54,16 @@ export default async function PipelinePage() {
                         <div className="font-medium text-white">{lead.first_name} {lead.last_name}</div>
                         <div className="text-xs text-gray-400">{lead.email || 'No email yet'}</div>
                       </td>
-                      <td className="px-6 py-4 text-blue-400 font-mono text-xs">{lead.ig_handle || lead.source}</td>
+                      <td className="px-6 py-4 text-blue-400 font-mono text-xs">
+                        {lead.ig_handle ? (
+                          <a href={`https://instagram.com/${lead.ig_handle}`} target="_blank" rel="noopener noreferrer" className="hover:underline flex items-center gap-1">
+                            @{lead.ig_handle}
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                          </a>
+                        ) : (
+                          lead.source
+                        )}
+                      </td>
                       <td className="px-6 py-4">
                         <span className={`px-2 py-1 rounded text-xs font-medium border ${
                           lead.status === 'new' ? 'bg-gray-500/20 text-gray-300 border-gray-500/30' :
