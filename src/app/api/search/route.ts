@@ -6,7 +6,7 @@ const ACTOR_ID   = 'scraperlink~google-search-results-serp-scraper';
 const APIFY_BASE = 'https://api.apify.com/v2';
 const POLL_INTERVAL_MS = 4_000;
 const MAX_WAIT_MS = 3 * 60 * 1000; // 3 minutos
-const RESULTS_LIMIT = 50;
+const RESULTS_LIMIT = 15; // Límite anticréditos (15 resultados por búsqueda)
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+\-]+@(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,10}/g;
 
