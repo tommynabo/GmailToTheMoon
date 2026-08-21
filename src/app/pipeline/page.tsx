@@ -51,7 +51,11 @@ export default async function PipelinePage() {
                   leads.map((lead: any) => (
                     <tr key={lead.id} className="border-b border-white/5 hover:bg-white/5 transition-colors">
                       <td className="px-6 py-4">
-                        <div className="font-medium text-white">{lead.first_name} {lead.last_name}</div>
+                        <div className="font-medium text-white">
+                          {(lead.first_name || lead.last_name) 
+                            ? `${lead.first_name || ''} ${lead.last_name || ''}`.trim() 
+                            : 'Prospect from Instagram'}
+                        </div>
                         <div className="text-xs text-gray-400">{lead.email || 'No email yet'}</div>
                       </td>
                       <td className="px-6 py-4 text-blue-400 font-mono text-xs">

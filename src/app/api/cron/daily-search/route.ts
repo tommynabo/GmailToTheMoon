@@ -109,8 +109,11 @@ async function apifyAbort(token: string, runId: string): Promise<void> {
 
 export async function GET(req: Request) {
   // Seguridad: solo Vercel Cron o entorno dev
-  const isCron = req.headers.get('x-vercel-cron') === '1';
-  if (!isCron && process.env.NODE_ENV === 'production') {
+  const isVercelCron = req.headers.get('x-vercel-cron') === '1';
+  const url = new URL(req.url);
+  const isSecretKey = url.searchParams.get('key') === process.env.CRON_SECRET && !!process.env.CRON_SECRET;
+  
+  if (!isVercelCron && !isSecretKey && process.env.NODE_ENV === 'production') {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
