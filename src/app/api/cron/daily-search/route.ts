@@ -21,7 +21,7 @@ const ACTOR_ID  = 'scraperlink~google-search-results-serp-scraper';
 const APIFY_BASE = 'https://api.apify.com/v2';
 const POLL_INTERVAL_MS = 4_000;
 const MAX_WAIT_MS = 3 * 60 * 1000; // 3 minutos máximo de espera
-const RESULTS_LIMIT = 15; // Límite anticréditos (15 resultados por búsqueda)
+const RESULTS_LIMIT = 20; // Límite anticréditos (sólo permite: 10, 20, 30, 40, 50, 100)
 
 // Regex de email estándar
 const EMAIL_REGEX = /[a-zA-Z0-9._%+\-]+@(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,10}/g;
@@ -166,8 +166,16 @@ export async function GET(req: Request) {
     }
 
     // ─ 4. Obtener resultados ────────────────────────────────────────────────
-    const items = await apifyGetItems(token, datasetId);
-    console.log(`[Autopilot] Items received: ${items.length}`);
+    const datasetItems = await apifyGetItems(token, datasetId);
+    const items = [];
+    for (const d of datasetItems) {
+      if (d.results && Array.isArray(d.results)) {
+        items.push(...d.results);
+      } else {
+        items.push(d);
+      }
+    }
+    console.log(`[Autopilot] Items extracted: ${items.length}`);
 
     // ─ 5. Procesar y guardar leads ──────────────────────────────────────────
     let leadsInserted = 0;
